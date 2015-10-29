@@ -27,7 +27,10 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InterruptedIOException;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.NoRouteToHostException;
+import java.net.ProtocolException;
 import java.net.URL;
 import java.util.HashMap;
 import java.util.List;
@@ -38,17 +41,30 @@ import java.util.regex.Pattern;
 
 /**
  * A {@link HttpDataSource} that uses Android's {@link HttpURLConnection}.
+ * <p>
+ * By default this implementation will not follow cross-protocol redirects (i.e. redirects from
+ * HTTP to HTTPS or vice versa). Cross-protocol redirects can be enabled by using the
+ * {@link #DefaultHttpDataSource(String, Predicate, TransferListener, int, int, boolean)}
+ * constructor and passing {@code true} as the final argument.
  */
 public class DefaultHttpDataSource implements HttpDataSource {
 
+  /**
+   * The default connection timeout, in milliseconds.
+   */
   public static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 8 * 1000;
+  /**
+   * The default read timeout, in milliseconds.
+   */
   public static final int DEFAULT_READ_TIMEOUT_MILLIS = 8 * 1000;
 
-  private static final String TAG = "HttpDataSource";
+  private static final int MAX_REDIRECTS = 20; // Same limit as okhttp.
+  private static final String TAG = "DefaultHttpDataSource";
   private static final Pattern CONTENT_RANGE_HEADER =
       Pattern.compile("^bytes (\\d+)-(\\d+)/(\\d+)$");
-  private static final AtomicReference<byte[]> skipBufferReference = new AtomicReference<byte[]>();
+  private static final AtomicReference<byte[]> skipBufferReference = new AtomicReference<>();
 
+  private final boolean allowCrossProtocolRedirects;
   private final int connectTimeoutMillis;
   private final int readTimeoutMillis;
   private final String userAgent;
@@ -103,17 +119,43 @@ public class DefaultHttpDataSource implements HttpDataSource {
    */
   public DefaultHttpDataSource(String userAgent, Predicate<String> contentTypePredicate,
       TransferListener listener, int connectTimeoutMillis, int readTimeoutMillis) {
+    this(userAgent, contentTypePredicate, listener, connectTimeoutMillis, readTimeoutMillis, false);
+  }
+
+  /**
+   * @param userAgent The User-Agent string that should be used.
+   * @param contentTypePredicate An optional {@link Predicate}. If a content type is
+   *     rejected by the predicate then a {@link HttpDataSource.InvalidContentTypeException} is
+   *     thrown from {@link #open(DataSpec)}.
+   * @param listener An optional listener.
+   * @param connectTimeoutMillis The connection timeout, in milliseconds. A timeout of zero is
+   *     interpreted as an infinite timeout. Pass {@link #DEFAULT_CONNECT_TIMEOUT_MILLIS} to use
+   *     the default value.
+   * @param readTimeoutMillis The read timeout, in milliseconds. A timeout of zero is interpreted
+   *     as an infinite timeout. Pass {@link #DEFAULT_READ_TIMEOUT_MILLIS} to use the default value.
+   * @param allowCrossProtocolRedirects Whether cross-protocol redirects (i.e. redirects from HTTP
+   *     to HTTPS and vice versa) are enabled.
+   */
+  public DefaultHttpDataSource(String userAgent, Predicate<String> contentTypePredicate,
+      TransferListener listener, int connectTimeoutMillis, int readTimeoutMillis,
+      boolean allowCrossProtocolRedirects) {
     this.userAgent = Assertions.checkNotEmpty(userAgent);
     this.contentTypePredicate = contentTypePredicate;
     this.listener = listener;
-    this.requestProperties = new HashMap<String, String>();
+    this.requestProperties = new HashMap<>();
     this.connectTimeoutMillis = connectTimeoutMillis;
     this.readTimeoutMillis = readTimeoutMillis;
+    this.allowCrossProtocolRedirects = allowCrossProtocolRedirects;
   }
 
   @Override
   public String getUri() {
     return connection == null ? null : connection.getURL().toString();
+  }
+
+  @Override
+  public Map<String, List<String>> getResponseHeaders() {
+    return connection == null ? null : connection.getHeaderFields();
   }
 
   @Override
@@ -156,7 +198,7 @@ public class DefaultHttpDataSource implements HttpDataSource {
     try {
       responseCode = connection.getResponseCode();
     } catch (IOException e) {
-      closeConnection();
+      closeConnectionQuietly();
       throw new HttpDataSourceException("Unable to connect to " + dataSpec.uri.toString(), e,
           dataSpec);
     }
@@ -164,14 +206,14 @@ public class DefaultHttpDataSource implements HttpDataSource {
     // Check for a valid response code.
     if (responseCode < 200 || responseCode > 299) {
       Map<String, List<String>> headers = connection.getHeaderFields();
-      closeConnection();
+      closeConnectionQuietly();
       throw new InvalidResponseCodeException(responseCode, headers, dataSpec);
     }
 
     // Check for a valid content type.
     String contentType = connection.getContentType();
     if (contentTypePredicate != null && !contentTypePredicate.evaluate(contentType)) {
-      closeConnection();
+      closeConnectionQuietly();
       throw new InvalidContentTypeException(contentType, dataSpec);
     }
 
@@ -197,7 +239,7 @@ public class DefaultHttpDataSource implements HttpDataSource {
     try {
       inputStream = connection.getInputStream();
     } catch (IOException e) {
-      closeConnection();
+      closeConnectionQuietly();
       throw new HttpDataSourceException(e, dataSpec);
     }
 
@@ -229,15 +271,15 @@ public class DefaultHttpDataSource implements HttpDataSource {
         } catch (IOException e) {
           throw new HttpDataSourceException(e, dataSpec);
         }
-        inputStream = null;
       }
     } finally {
+      inputStream = null;
+      closeConnectionQuietly();
       if (opened) {
         opened = false;
         if (listener != null) {
           listener.onTransferEnd();
         }
-        closeConnection();
       }
     }
   }
@@ -283,39 +325,133 @@ public class DefaultHttpDataSource implements HttpDataSource {
     return bytesToRead == C.LENGTH_UNBOUNDED ? bytesToRead : bytesToRead - bytesRead;
   }
 
+  /**
+   * Establishes a connection, following redirects to do so where permitted.
+   */
   private HttpURLConnection makeConnection(DataSpec dataSpec) throws IOException {
     URL url = new URL(dataSpec.uri.toString());
+    byte[] postBody = dataSpec.postBody;
+    long position = dataSpec.position;
+    long length = dataSpec.length;
+    boolean allowGzip = (dataSpec.flags & DataSpec.FLAG_ALLOW_GZIP) != 0;
+
+    if (!allowCrossProtocolRedirects) {
+      // HttpURLConnection disallows cross-protocol redirects, but otherwise performs redirection
+      // automatically. This is the behavior we want, so use it.
+      HttpURLConnection connection = makeConnection(
+          url, postBody, position, length, allowGzip, true /* followRedirects */);
+      return connection;
+    }
+
+    // We need to handle redirects ourselves to allow cross-protocol redirects.
+    int redirectCount = 0;
+    while (redirectCount++ <= MAX_REDIRECTS) {
+      HttpURLConnection connection = makeConnection(
+          url, postBody, position, length, allowGzip, false /* followRedirects */);
+      int responseCode = connection.getResponseCode();
+      if (responseCode == HttpURLConnection.HTTP_MULT_CHOICE
+          || responseCode == HttpURLConnection.HTTP_MOVED_PERM
+          || responseCode == HttpURLConnection.HTTP_MOVED_TEMP
+          || responseCode == HttpURLConnection.HTTP_SEE_OTHER
+          || (postBody == null
+              && (responseCode == 307 /* HTTP_TEMP_REDIRECT */
+                  || responseCode == 308 /* HTTP_PERM_REDIRECT */))) {
+        // For 300, 301, 302, and 303 POST requests follow the redirect and are transformed into
+        // GET requests. For 307 and 308 POST requests are not redirected.
+        postBody = null;
+        String location = connection.getHeaderField("Location");
+        connection.disconnect();
+        url = handleRedirect(url, location);
+      } else {
+        return connection;
+      }
+    }
+
+    // If we get here we've been redirected more times than are permitted.
+    throw new NoRouteToHostException("Too many redirects: " + redirectCount);
+  }
+
+  /**
+   * Configures a connection and opens it.
+   *
+   * @param url The url to connect to.
+   * @param postBody The body data for a POST request.
+   * @param position The byte offset of the requested data.
+   * @param length The length of the requested data, or {@link C#LENGTH_UNBOUNDED}.
+   * @param allowGzip Whether to allow the use of gzip.
+   * @param followRedirects Whether to follow redirects.
+   */
+  private HttpURLConnection makeConnection(URL url, byte[] postBody, long position,
+      long length, boolean allowGzip, boolean followRedirects) throws IOException {
     HttpURLConnection connection = (HttpURLConnection) url.openConnection();
     connection.setConnectTimeout(connectTimeoutMillis);
     connection.setReadTimeout(readTimeoutMillis);
-    connection.setDoOutput(false);
     synchronized (requestProperties) {
       for (Map.Entry<String, String> property : requestProperties.entrySet()) {
         connection.setRequestProperty(property.getKey(), property.getValue());
       }
     }
-    setRangeHeader(connection, dataSpec);
+    if (!(position == 0 && length == C.LENGTH_UNBOUNDED)) {
+      String rangeRequest = "bytes=" + position + "-";
+      if (length != C.LENGTH_UNBOUNDED) {
+        rangeRequest += (position + length - 1);
+      }
+      connection.setRequestProperty("Range", rangeRequest);
+    }
     connection.setRequestProperty("User-Agent", userAgent);
-    if ((dataSpec.flags & DataSpec.FLAG_ALLOW_GZIP) == 0) {
+    if (!allowGzip) {
       connection.setRequestProperty("Accept-Encoding", "identity");
     }
-    connection.connect();
+    connection.setInstanceFollowRedirects(followRedirects);
+    connection.setDoOutput(postBody != null);
+    if (postBody != null) {
+      connection.setFixedLengthStreamingMode(postBody.length);
+      connection.connect();
+      OutputStream os = connection.getOutputStream();
+      os.write(postBody);
+      os.close();
+    } else {
+      connection.connect();
+    }
     return connection;
   }
 
-  private void setRangeHeader(HttpURLConnection connection, DataSpec dataSpec) {
-    if (dataSpec.position == 0 && dataSpec.length == C.LENGTH_UNBOUNDED) {
-      // Not required.
-      return;
+  /**
+   * Handles a redirect.
+   *
+   * @param originalUrl The original URL.
+   * @param location The Location header in the response.
+   * @return The next URL.
+   * @throws IOException If redirection isn't possible.
+   */
+  private static URL handleRedirect(URL originalUrl, String location) throws IOException {
+    if (location == null) {
+      throw new ProtocolException("Null location redirect");
     }
-    String rangeRequest = "bytes=" + dataSpec.position + "-";
-    if (dataSpec.length != C.LENGTH_UNBOUNDED) {
-      rangeRequest += (dataSpec.position + dataSpec.length - 1);
+    // Form the new url.
+    URL url = new URL(originalUrl, location);
+    // Check that the protocol of the new url is supported.
+    String protocol = url.getProtocol();
+    if (!"https".equals(protocol) && !"http".equals(protocol)) {
+      throw new ProtocolException("Unsupported protocol redirect: " + protocol);
     }
-    connection.setRequestProperty("Range", rangeRequest);
+    // Currently this method is only called if allowCrossProtocolRedirects is true, and so the code
+    // below isn't required. If we ever decide to handle redirects ourselves when cross-protocol
+    // redirects are disabled, we'll need to uncomment this block of code.
+    // if (!allowCrossProtocolRedirects && !protocol.equals(originalUrl.getProtocol())) {
+    //   throw new ProtocolException("Disallowed cross-protocol redirect ("
+    //       + originalUrl.getProtocol() + " to " + protocol + ")");
+    // }
+    return url;
   }
 
-  private long getContentLength(HttpURLConnection connection) {
+  /**
+   * Attempts to extract the length of the content from the response headers of an open connection.
+   *
+   * @param connection The open connection.
+   * @return The extracted length, or {@link C#LENGTH_UNBOUNDED}.
+   */
+  private static long getContentLength(HttpURLConnection connection) {
     long contentLength = C.LENGTH_UNBOUNDED;
     String contentLengthHeader = connection.getHeaderField("Content-Length");
     if (!TextUtils.isEmpty(contentLengthHeader)) {
@@ -429,9 +565,16 @@ public class DefaultHttpDataSource implements HttpDataSource {
     return read;
   }
 
-  private void closeConnection() {
+  /**
+   * Closes the current connection quietly, if there is one.
+   */
+  private void closeConnectionQuietly() {
     if (connection != null) {
-      connection.disconnect();
+      try {
+        connection.disconnect();
+      } catch (Exception e) {
+        Log.e(TAG, "Unexpected error while disconnecting", e);
+      }
       connection = null;
     }
   }

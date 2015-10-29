@@ -50,16 +50,14 @@ public final class VideoFormatSelectorUtil {
    *     mime types.
    * @param filterHdFormats True to filter HD formats. False otherwise.
    * @return An array holding the indices of the selected formats.
-   * @throws DecoderQueryException
+   * @throws DecoderQueryException Thrown if there was an error querying decoders.
    */
   public static int[] selectVideoFormatsForDefaultDisplay(Context context,
       List<? extends FormatWrapper> formatWrappers, String[] allowedContainerMimeTypes,
       boolean filterHdFormats) throws DecoderQueryException {
-    WindowManager windowManager = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
-    Display display = windowManager.getDefaultDisplay();
-    Point displaySize = getDisplaySize(display);
+    Point viewportSize = getViewportSize(context);
     return selectVideoFormats(formatWrappers, allowedContainerMimeTypes, filterHdFormats, true,
-        displaySize.x, displaySize.y);
+        viewportSize.x, viewportSize.y);
   }
 
   /**
@@ -94,7 +92,7 @@ public final class VideoFormatSelectorUtil {
       String[] allowedContainerMimeTypes, boolean filterHdFormats, boolean orientationMayChange,
       int viewportWidth, int viewportHeight) throws DecoderQueryException {
     int maxVideoPixelsToRetain = Integer.MAX_VALUE;
-    ArrayList<Integer> selectedIndexList = new ArrayList<Integer>();
+    ArrayList<Integer> selectedIndexList = new ArrayList<>();
     int maxDecodableFrameSize = MediaCodecUtil.maxH264DecodableFrameSize();
 
     // First pass to filter out formats that individually fail to meet the selection criteria.
@@ -108,7 +106,7 @@ public final class VideoFormatSelectorUtil {
         // Keep track of the number of pixels of the selected format whose resolution is the
         // smallest to exceed the maximum size at which it can be displayed within the viewport.
         // We'll discard formats of higher resolution in a second pass.
-        if (format.width != -1 && format.height != -1) {
+        if (format.width > 0 && format.height > 0) {
           Point maxVideoSizeInViewport = getMaxVideoSizeInViewport(orientationMayChange,
               viewportWidth, viewportHeight, format.width, format.height);
           int videoPixels = format.width * format.height;
@@ -125,8 +123,8 @@ public final class VideoFormatSelectorUtil {
     // unnecessarily high resolution given the size at which the video will be displayed within the
     // viewport.
     for (int i = selectedIndexList.size() - 1; i >= 0; i--) {
-      Format format = formatWrappers.get(i).getFormat();
-      if (format.width != -1 && format.height != -1
+      Format format = formatWrappers.get(selectedIndexList.get(i)).getFormat();
+      if (format.width > 0 && format.height > 0
           && format.width * format.height > maxVideoPixelsToRetain) {
         selectedIndexList.remove(i);
       }
@@ -150,7 +148,7 @@ public final class VideoFormatSelectorUtil {
       // Filtering format because it's HD.
       return false;
     }
-    if (format.width != -1 && format.height != -1) {
+    if (format.width > 0 && format.height > 0) {
       // TODO: Use MediaCodecUtil.isSizeAndRateSupportedV21 on API levels >= 21 if we know the
       // mimeType of the media samples within the container. Remove the assumption that we're
       // dealing with H.264.
@@ -182,6 +180,19 @@ public final class VideoFormatSelectorUtil {
       // Vertical letter-boxing along edges.
       return new Point(Util.ceilDivide(viewportHeight * videoWidth, videoHeight), viewportHeight);
     }
+  }
+
+  private static Point getViewportSize(Context context) {
+    // Before API 23 the platform Display object does not provide a way to identify Android TVs that
+    // can show 4k resolution in a SurfaceView, so check for supported devices here.
+    // See also https://developer.sony.com/develop/tvs/android-tv/design-guide/.
+    if (Util.MODEL != null && Util.MODEL.startsWith("BRAVIA")
+        && context.getPackageManager().hasSystemFeature("com.sony.dtv.hardware.panel.qfhd")) {
+      return new Point(3840, 2160);
+    }
+
+    WindowManager windowManager = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
+    return getDisplaySize(windowManager.getDefaultDisplay());
   }
 
   private static Point getDisplaySize(Display display) {

@@ -16,6 +16,7 @@
 package com.google.android.exoplayer.extractor.mp3;
 
 import com.google.android.exoplayer.C;
+import com.google.android.exoplayer.util.MpegAudioHeader;
 import com.google.android.exoplayer.util.ParsableByteArray;
 import com.google.android.exoplayer.util.Util;
 
@@ -24,13 +25,18 @@ import com.google.android.exoplayer.util.Util;
  */
 /* package */ final class XingSeeker implements Mp3Extractor.Seeker {
 
-  private static final int XING_HEADER = Util.getIntegerCodeForString("Xing");
-  private static final int INFO_HEADER = Util.getIntegerCodeForString("Info");
-
   /**
-   * If {@code frame} contains a XING header and it is usable for seeking, returns a
-   * {@link XingSeeker} for seeking in the containing stream. Otherwise, returns {@code null}, which
-   * indicates that the information in the frame was not a XING header, or was unusable for seeking.
+   * Returns a {@link XingSeeker} for seeking in the stream, if required information is present.
+   * Returns {@code null} if not. On returning, {@code frame}'s position is not specified so the
+   * caller should reset it.
+   *
+   * @param mpegAudioHeader The MPEG audio header associated with the frame.
+   * @param frame The data in this audio frame, with its position set to immediately after the
+   *    'XING' or 'INFO' tag.
+   * @param position The position (byte offset) of the start of this frame in the stream.
+   * @param inputLength The length of the stream in bytes.
+   * @return A {@link XingSeeker} for seeking in the stream, or {@code null} if the required
+   *     information is not present.
    */
   public static XingSeeker create(MpegAudioHeader mpegAudioHeader, ParsableByteArray frame,
       long position, long inputLength) {
@@ -38,47 +44,19 @@ import com.google.android.exoplayer.util.Util;
     int sampleRate = mpegAudioHeader.sampleRate;
     long firstFramePosition = position + mpegAudioHeader.frameSize;
 
-    // Skip to the XING header.
-    int xingBase;
-    if ((mpegAudioHeader.version & 1) == 1) {
-      // MPEG 1.
-      if (mpegAudioHeader.channels != 1) {
-        xingBase = 32;
-      } else {
-        xingBase = 17;
-      }
-    } else {
-      // MPEG 2 or 2.5.
-      if (mpegAudioHeader.channels != 1) {
-        xingBase = 17;
-      } else {
-        xingBase = 9;
-      }
-    }
-    frame.skipBytes(4 + xingBase);
-    int headerData = frame.readInt();
-    if (headerData != XING_HEADER && headerData != INFO_HEADER) {
-      return null;
-    }
-
     int flags = frame.readInt();
-    // Frame count, size and table of contents are required to use this header.
-    if ((flags & 0x07) != 0x07) {
+    int frameCount;
+    if ((flags & 0x01) != 0x01 || (frameCount = frame.readUnsignedIntToInt()) == 0) {
+      // If the frame count is missing/invalid, the header can't be used to determine the duration.
       return null;
     }
-
-    // Read frame count, as (flags & 1) == 1.
-    int frameCount = frame.readUnsignedIntToInt();
-    if (frameCount == 0) {
-      return null;
+    long durationUs = Util.scaleLargeTimestamp(frameCount, samplesPerFrame * 1000000L, sampleRate);
+    if ((flags & 0x06) != 0x06) {
+      // If the size in bytes or table of contents is missing, the stream is not seekable.
+      return new XingSeeker(inputLength, firstFramePosition, durationUs);
     }
-    long durationUs =
-        Util.scaleLargeTimestamp(frameCount, samplesPerFrame * 1000000L, sampleRate);
 
-    // Read size in bytes, as (flags & 2) == 2.
     long sizeBytes = frame.readUnsignedIntToInt();
-
-    // Read table-of-contents as (flags & 4) == 4.
     frame.skipBytes(1);
     long[] tableOfContents = new long[99];
     for (int i = 0; i < 99; i++) {
@@ -86,20 +64,26 @@ import com.google.android.exoplayer.util.Util;
     }
 
     // TODO: Handle encoder delay and padding in 3 bytes offset by xingBase + 213 bytes:
-    // delay = ((frame.readUnsignedByte() & 0xFF) << 4) + ((frame.readUnsignedByte() & 0xFF) >>> 4);
-    // padding = ((frame.readUnsignedByte() & 0x0F) << 8) + (frame.readUnsignedByte() & 0xFF);
-    return new XingSeeker(tableOfContents, firstFramePosition, sizeBytes, durationUs, inputLength);
+    // delay = (frame.readUnsignedByte() << 4) + (frame.readUnsignedByte() >> 4);
+    // padding = ((frame.readUnsignedByte() & 0x0F) << 8) + frame.readUnsignedByte();
+    return new XingSeeker(inputLength, firstFramePosition, durationUs, tableOfContents, sizeBytes);
   }
 
-  /** Entries are in the range [0, 255], but are stored as long integers for convenience. */
+  /**
+   * Entries are in the range [0, 255], but are stored as long integers for convenience.
+   */
   private final long[] tableOfContents;
   private final long firstFramePosition;
   private final long sizeBytes;
   private final long durationUs;
   private final long inputLength;
 
-  private XingSeeker(long[] tableOfContents, long firstFramePosition, long sizeBytes,
-      long durationUs, long inputLength) {
+  private XingSeeker(long inputLength, long firstFramePosition, long durationUs) {
+    this(inputLength, firstFramePosition, durationUs, null, 0);
+  }
+
+  private XingSeeker(long inputLength, long firstFramePosition, long durationUs,
+      long[] tableOfContents, long sizeBytes) {
     this.tableOfContents = tableOfContents;
     this.firstFramePosition = firstFramePosition;
     this.sizeBytes = sizeBytes;
@@ -109,11 +93,14 @@ import com.google.android.exoplayer.util.Util;
 
   @Override
   public boolean isSeekable() {
-    return true;
+    return tableOfContents != null;
   }
 
   @Override
   public long getPosition(long timeUs) {
+    if (!isSeekable()) {
+      return firstFramePosition;
+    }
     float percent = timeUs * 100f / durationUs;
     float fx;
     if (percent <= 0f) {
@@ -136,14 +123,17 @@ import com.google.android.exoplayer.util.Util;
       fx = fa + (fb - fa) * (percent - a);
     }
 
-    long position = (long) ((1f / 256) * fx * sizeBytes) + firstFramePosition;
-    return inputLength != C.LENGTH_UNBOUNDED ? Math.min(position, inputLength) : position;
+    long position = (long) ((1.0 / 256) * fx * sizeBytes) + firstFramePosition;
+    return inputLength != C.LENGTH_UNBOUNDED ? Math.min(position, inputLength - 1) : position;
   }
 
   @Override
   public long getTimeUs(long position) {
-    long offsetByte = 256 * (position - firstFramePosition) / sizeBytes;
-    int previousIndex = Util.binarySearchFloor(tableOfContents, offsetByte, true, false);
+    if (!isSeekable()) {
+      return 0L;
+    }
+    double offsetByte = 256.0 * (position - firstFramePosition) / sizeBytes;
+    int previousIndex = Util.binarySearchFloor(tableOfContents, (long) offsetByte, true, false);
     long previousTime = getTimeUsForTocIndex(previousIndex);
     if (previousIndex == 98) {
       return previousTime;
@@ -153,8 +143,8 @@ import com.google.android.exoplayer.util.Util;
     long previousByte = previousIndex == -1 ? 0 : tableOfContents[previousIndex];
     long nextByte = tableOfContents[previousIndex + 1];
     long nextTime = getTimeUsForTocIndex(previousIndex + 1);
-    long timeOffset =
-        (nextTime - previousTime) * (offsetByte - previousByte) / (nextByte - previousByte);
+    long timeOffset = nextByte == previousByte ? 0 : (long) ((nextTime - previousTime)
+        * (offsetByte - previousByte) / (nextByte - previousByte));
     return previousTime + timeOffset;
   }
 
@@ -163,7 +153,9 @@ import com.google.android.exoplayer.util.Util;
     return durationUs;
   }
 
-  /** Returns the time in microseconds corresponding to an index in the table of contents. */
+  /**
+   * Returns the time in microseconds corresponding to an index in the table of contents.
+   */
   private long getTimeUsForTocIndex(int tocIndex) {
     return durationUs * (tocIndex + 1) / 100;
   }
