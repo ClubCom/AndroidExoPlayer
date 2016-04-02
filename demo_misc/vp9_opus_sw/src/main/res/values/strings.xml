@@ -22,5 +22,12 @@
   <string name="current_path">
     Path: <xliff:g id="path" example="/sdcard/test.webm">%1$s</xliff:g>
   </string>
+  <string name="libvpx_version">
+    Libvpx: <xliff:g id="path">%1$s</xliff:g>
+  </string>
+  <string name="libopus_version">
+    Libopus: <xliff:g id="path">%1$s</xliff:g>
+  </string>
+  <string name="storage_permission_denied">Permission to access storage was denied</string>
 
 </resources>

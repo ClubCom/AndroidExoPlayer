@@ -21,17 +21,23 @@ import java.nio.ByteBuffer;
 
 /**
  * JNI Wrapper for the libopus Opus decoder.
- *
- * @author vigneshv@google.com (Vignesh Venkatasubramanian)
  */
 /* package */ class OpusDecoder {
 
-  private final long nativeDecoderContext;
-
+  private static final boolean IS_AVAILABLE;
   static {
-    System.loadLibrary("opus");
-    System.loadLibrary("opusJNI");
+    boolean isAvailable;
+    try {
+      System.loadLibrary("opus");
+      System.loadLibrary("opusJNI");
+      isAvailable = true;
+    } catch (UnsatisfiedLinkError exception) {
+      isAvailable = false;
+    }
+    IS_AVAILABLE = isAvailable;
   }
+
+  private final long nativeDecoderContext;
 
   /**
    * Creates the Opus Decoder.
@@ -44,7 +50,7 @@ import java.nio.ByteBuffer;
         opusHeader.sampleRate, opusHeader.channelCount, opusHeader.numStreams,
         opusHeader.numCoupled, opusHeader.gain, opusHeader.streamMap);
     if (nativeDecoderContext == 0) {
-      throw new OpusDecoderException("failed to initialize opus decoder");
+      throw new OpusDecoderException("Failed to initialize decoder");
     }
   }
 
@@ -62,7 +68,7 @@ import java.nio.ByteBuffer;
       int outputSize) throws OpusDecoderException {
     int result = opusDecode(nativeDecoderContext, inputBuffer, inputSize, outputBuffer, outputSize);
     if (result < 0) {
-      throw new OpusDecoderException(opusGetErrorMessage(result));
+      throw new OpusDecoderException("Decode error: " + opusGetErrorMessage(result));
     }
     return result;
   }
@@ -80,6 +86,18 @@ import java.nio.ByteBuffer;
   public void reset() {
     opusReset(nativeDecoderContext);
   }
+
+  /**
+   * Returns whether the underlying libopus library is available.
+   */
+  public static boolean isLibopusAvailable() {
+    return IS_AVAILABLE;
+  }
+
+  /**
+   * Returns the version string of the underlying libopus decoder.
+   */
+  public static native String getLibopusVersion();
 
   private native long opusInit(int sampleRate, int channelCount, int numStreams, int numCoupled,
       int gain, byte[] streamMap);

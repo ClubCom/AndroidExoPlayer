@@ -15,8 +15,6 @@
  */
 package com.google.android.exoplayer.ext.vp9;
 
-import com.google.android.exoplayer.ext.vp9.VpxDecoderWrapper.OutputBuffer;
-
 import java.nio.ByteBuffer;
 
 /**
@@ -24,12 +22,24 @@ import java.nio.ByteBuffer;
  */
 /* package */ class VpxDecoder {
 
-  private final long vpxDecContext;
-
+  private static final boolean IS_AVAILABLE;
   static {
-    System.loadLibrary("vpx");
-    System.loadLibrary("vpxJNI");
+    boolean isAvailable;
+    try {
+      System.loadLibrary("vpx");
+      System.loadLibrary("vpxJNI");
+      isAvailable = true;
+    } catch (UnsatisfiedLinkError exception) {
+      isAvailable = false;
+    }
+    IS_AVAILABLE = isAvailable;
   }
+
+  public static final int OUTPUT_MODE_UNKNOWN = -1;
+  public static final int OUTPUT_MODE_YUV = 0;
+  public static final int OUTPUT_MODE_RGB = 1;
+
+  private final long vpxDecContext;
 
   /**
    * Creates the VP9 Decoder.
@@ -39,7 +49,7 @@ import java.nio.ByteBuffer;
   public VpxDecoder() throws VpxDecoderException {
     vpxDecContext = vpxInit();
     if (vpxDecContext == 0) {
-      throw new VpxDecoderException("libvpx initialization error: failed to initialize decoder");
+      throw new VpxDecoderException("Failed to initialize decoder");
     }
   }
 
@@ -49,17 +59,15 @@ import java.nio.ByteBuffer;
    * @param encoded The encoded buffer.
    * @param size Size of the encoded buffer.
    * @param outputBuffer The buffer into which the decoded frame should be written.
-   * @param outputRgb True if the buffer should be converted to RGB color format. False if YUV
-   *     format should be retained.
    * @return 0 on success with a frame to render. 1 on success without a frame to render.
    * @throws VpxDecoderException on decode failure.
    */
-  public int decode(ByteBuffer encoded, int size, OutputBuffer outputBuffer, boolean outputRgb) 
+  public int decode(ByteBuffer encoded, int size, VpxOutputBuffer outputBuffer)
       throws VpxDecoderException {
     if (vpxDecode(vpxDecContext, encoded, size) != 0) {
-      throw new VpxDecoderException("libvpx decode error: " + vpxGetErrorMessage(vpxDecContext));
+      throw new VpxDecoderException("Decode error: " + vpxGetErrorMessage(vpxDecContext));
     }
-    return vpxGetFrame(vpxDecContext, outputBuffer, outputRgb);
+    return vpxGetFrame(vpxDecContext, outputBuffer);
   }
 
   /**
@@ -69,10 +77,22 @@ import java.nio.ByteBuffer;
     vpxClose(vpxDecContext);
   }
 
+  /**
+   * Returns whether the underlying libvpx library is available.
+   */
+  public static boolean isLibvpxAvailable() {
+    return IS_AVAILABLE;
+  }
+
+  /**
+   * Returns the version string of the underlying libvpx decoder.
+   */
+  public static native String getLibvpxVersion();
+
   private native long vpxInit();
   private native long vpxClose(long context);
   private native long vpxDecode(long context, ByteBuffer encoded, int length);
-  private native int vpxGetFrame(long context, OutputBuffer outputBuffer, boolean outputRgb);
+  private native int vpxGetFrame(long context, VpxOutputBuffer outputBuffer);
   private native String vpxGetErrorMessage(long context);
 
 }

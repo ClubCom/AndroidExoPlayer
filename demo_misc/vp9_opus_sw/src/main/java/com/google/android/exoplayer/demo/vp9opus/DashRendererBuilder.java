@@ -18,12 +18,14 @@ package com.google.android.exoplayer.demo.vp9opus;
 import com.google.android.exoplayer.DefaultLoadControl;
 import com.google.android.exoplayer.LoadControl;
 import com.google.android.exoplayer.MediaCodecAudioTrackRenderer;
+import com.google.android.exoplayer.MediaCodecSelector;
 import com.google.android.exoplayer.SampleSource;
 import com.google.android.exoplayer.TrackRenderer;
 import com.google.android.exoplayer.chunk.ChunkSampleSource;
 import com.google.android.exoplayer.chunk.ChunkSource;
 import com.google.android.exoplayer.chunk.FormatEvaluator.AdaptiveEvaluator;
 import com.google.android.exoplayer.dash.DashChunkSource;
+import com.google.android.exoplayer.dash.DefaultDashTrackSelector;
 import com.google.android.exoplayer.dash.mpd.AdaptationSet;
 import com.google.android.exoplayer.dash.mpd.MediaPresentationDescription;
 import com.google.android.exoplayer.dash.mpd.MediaPresentationDescriptionParser;
@@ -55,9 +57,9 @@ public class DashRendererBuilder implements ManifestCallback<MediaPresentationDe
 
   private final String manifestUrl;
   private final String userAgent;
-  private final VideoPlayer player;
+  private final PlayerActivity player;
 
-  public DashRendererBuilder(String manifestUrl, String userAgent, VideoPlayer player) {
+  public DashRendererBuilder(String manifestUrl, String userAgent, PlayerActivity player) {
     this.manifestUrl = manifestUrl;
     this.userAgent = userAgent;
     this.player = player;
@@ -108,7 +110,8 @@ public class DashRendererBuilder implements ManifestCallback<MediaPresentationDe
     LibvpxVideoTrackRenderer videoRenderer = null;
     if (!videoRepresentationsList.isEmpty()) {
       DataSource videoDataSource = new DefaultUriDataSource(player, bandwidthMeter, userAgent);
-      ChunkSource videoChunkSource = new DashChunkSource(videoDataSource,
+      ChunkSource videoChunkSource = new DashChunkSource(
+          DefaultDashTrackSelector.newVideoInstance(null, false, false), videoDataSource,
           new AdaptiveEvaluator(bandwidthMeter), manifest.getPeriodDuration(0),
           AdaptationSet.TYPE_VIDEO, videoRepresentations);
       ChunkSampleSource videoSampleSource = new ChunkSampleSource(videoChunkSource, loadControl,
@@ -123,14 +126,16 @@ public class DashRendererBuilder implements ManifestCallback<MediaPresentationDe
       audioRenderer = null;
     } else {
       DataSource audioDataSource = new DefaultUriDataSource(player, bandwidthMeter, userAgent);
-      DashChunkSource audioChunkSource = new DashChunkSource(audioDataSource, null,
-            manifest.getPeriodDuration(0), AdaptationSet.TYPE_AUDIO, audioRepresentation);
+      DashChunkSource audioChunkSource = new DashChunkSource(
+          DefaultDashTrackSelector.newAudioInstance(), audioDataSource, null,
+          manifest.getPeriodDuration(0), AdaptationSet.TYPE_AUDIO, audioRepresentation);
       SampleSource audioSampleSource = new ChunkSampleSource(audioChunkSource, loadControl,
           AUDIO_BUFFER_SEGMENTS * BUFFER_SEGMENT_SIZE);
       if (audioRepresentationIsOpus) {
         audioRenderer = new LibopusAudioTrackRenderer(audioSampleSource);
       } else {
-        audioRenderer = new MediaCodecAudioTrackRenderer(audioSampleSource);
+        audioRenderer = new MediaCodecAudioTrackRenderer(audioSampleSource,
+            MediaCodecSelector.DEFAULT);
       }
     }
 

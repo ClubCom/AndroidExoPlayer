@@ -108,7 +108,7 @@ import java.util.concurrent.atomic.AtomicInteger;
     trackFormats = new MediaFormat[selectedTrackIndices.length][];
     // Note: The documentation for Process.THREAD_PRIORITY_AUDIO that states "Applications can
     // not normally change to this priority" is incorrect.
-    internalPlaybackThread = new PriorityHandlerThread(getClass().getSimpleName() + ":Handler",
+    internalPlaybackThread = new PriorityHandlerThread("ExoPlayerImplInternal:Handler",
         Process.THREAD_PRIORITY_AUDIO);
     internalPlaybackThread.start();
     handler = new Handler(internalPlaybackThread.getLooper(), this);
@@ -640,7 +640,9 @@ import java.util.concurrent.atomic.AtomicInteger;
     if (shouldEnable) {
       // Re-enable the renderer with the newly selected track.
       boolean playing = playWhenReady && state == ExoPlayer.STATE_READY;
-      renderer.enable(trackIndex, positionUs, playing);
+      // Consider as joining if the renderer was previously disabled, but not when switching tracks.
+      boolean joining = !isEnabled && playing;
+      renderer.enable(trackIndex, positionUs, joining);
       enabledRenderers.add(renderer);
       if (playing) {
         renderer.start();
