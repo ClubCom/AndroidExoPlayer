@@ -162,7 +162,7 @@ public class DemoPlayer implements ExoPlayer.Listener, ChunkSampleSource.EventLi
   private static final int RENDERER_BUILDING_STATE_BUILDING = 2;
   private static final int RENDERER_BUILDING_STATE_BUILT = 3;
 
-  private final RendererBuilder rendererBuilder;
+  private RendererBuilder rendererBuilder;
   private final ExoPlayer player;
   private final PlayerControl playerControl;
   private final Handler mainHandler;
@@ -197,6 +197,14 @@ public class DemoPlayer implements ExoPlayer.Listener, ChunkSampleSource.EventLi
     rendererBuildingState = RENDERER_BUILDING_STATE_IDLE;
     // Disable text initially.
     player.setSelectedTrack(TYPE_TEXT, TRACK_DISABLED);
+  }
+
+  public void stop() {
+    player.stop();
+  }
+
+  public void setRendererBuilder(RendererBuilder rendererBuilder) {
+    this.rendererBuilder = rendererBuilder;
   }
 
   public PlayerControl getPlayerControl() {

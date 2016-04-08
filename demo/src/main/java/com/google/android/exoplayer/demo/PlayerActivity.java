@@ -367,6 +367,11 @@ public class PlayerActivity extends Activity implements SurfaceHolder.Callback, 
         break;
       case ExoPlayer.STATE_ENDED:
         text += "ended";
+        player.stop();
+        player.seekTo(0L);
+        playerNeedsPrepare = true;
+        player.setRendererBuilder(new ExtractorRendererBuilder(this, "Meh", Uri.parse("file:///mnt/sdcard/content/Files/333140.mp4")));
+        preparePlayer(true);
         break;
       case ExoPlayer.STATE_IDLE:
         text += "idle";

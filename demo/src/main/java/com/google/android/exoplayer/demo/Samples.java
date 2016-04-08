@@ -227,6 +227,7 @@ import java.util.Locale;
   };
 
   public static final Sample[] MISC = new Sample[] {
+    new Sample("Local", "file:///mnt/sdcard/content/Files/333140.mp4", Util.TYPE_OTHER),
     new Sample("Dizzy", "http://html5demos.com/assets/dizzy.mp4", Util.TYPE_OTHER),
     new Sample("Apple AAC 10s", "https://devimages.apple.com.edgekey.net/"
         + "streaming/examples/bipbop_4x3/gear0/fileSequence0.aac", Util.TYPE_OTHER),
