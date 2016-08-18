@@ -326,7 +326,6 @@ public class MediaCodecVideoTrackRenderer extends MediaCodecTrackRenderer {
       android.media.MediaFormat format, MediaCrypto crypto) {
     maybeSetMaxInputSize(format, codecIsAdaptive);
     codec.configure(format, surface, crypto, 0);
-    codec.setVideoScalingMode(videoScalingMode);
   }
 
   @Override
@@ -346,7 +345,7 @@ public class MediaCodecVideoTrackRenderer extends MediaCodecTrackRenderer {
   }
 
   @Override
-  protected void onOutputFormatChanged(android.media.MediaFormat outputFormat) {
+  protected void onOutputFormatChanged(MediaCodec codec, android.media.MediaFormat outputFormat) {
     boolean hasCrop = outputFormat.containsKey(KEY_CROP_RIGHT)
         && outputFormat.containsKey(KEY_CROP_LEFT) && outputFormat.containsKey(KEY_CROP_BOTTOM)
         && outputFormat.containsKey(KEY_CROP_TOP);
@@ -371,6 +370,8 @@ public class MediaCodecVideoTrackRenderer extends MediaCodecTrackRenderer {
       // On API level 20 and below the decoder does not apply the rotation.
       currentUnappliedRotationDegrees = pendingRotationDegrees;
     }
+    // Must be applied each time the output format changes.
+    codec.setVideoScalingMode(videoScalingMode);
   }
 
   @Override
@@ -512,6 +513,11 @@ public class MediaCodecVideoTrackRenderer extends MediaCodecTrackRenderer {
     int maxPixels;
     int minCompressionRatio;
     switch (format.getString(android.media.MediaFormat.KEY_MIME)) {
+      case MimeTypes.VIDEO_H263:
+      case MimeTypes.VIDEO_MP4V:
+        maxPixels = maxWidth * maxHeight;
+        minCompressionRatio = 2;
+        break;
       case MimeTypes.VIDEO_H264:
         if ("BRAVIA 4K 2015".equals(Util.MODEL)) {
           // The Sony BRAVIA 4k TV has input buffers that are too small for the calculated 4k video

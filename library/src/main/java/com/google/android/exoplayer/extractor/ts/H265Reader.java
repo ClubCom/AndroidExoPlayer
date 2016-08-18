@@ -64,6 +64,10 @@ import java.util.Collections;
   // Scratch variables to avoid allocations.
   private final ParsableByteArray seiWrapper;
 
+  /**
+   * @param output A {@link TrackOutput} to which H.265 samples should be written.
+   * @param seiReader A reader for EIA-608 samples in SEI NAL units.
+   */
   public H265Reader(TrackOutput output, SeiReader seiReader) {
     super(output);
     this.seiReader = seiReader;
@@ -130,7 +134,7 @@ import java.util.Collections;
         // Indicate the end of the previous NAL unit. If the length to the start of the next unit
         // is negative then we wrote too many bytes to the NAL buffers. Discard the excess bytes
         // when notifying that the unit has ended.
-        nalUnitEnd(absolutePosition, bytesWrittenPastPosition,
+        endNalUnit(absolutePosition, bytesWrittenPastPosition,
             lengthToNalUnit < 0 ? -lengthToNalUnit : 0, pesTimeUs);
         // Indicate the start of the next NAL unit.
         startNalUnit(absolutePosition, bytesWrittenPastPosition, nalUnitType, pesTimeUs);
@@ -146,14 +150,15 @@ import java.util.Collections;
   }
 
   private void startNalUnit(long position, int offset, int nalUnitType, long pesTimeUs) {
-    if (!hasOutputFormat) {
+    if (hasOutputFormat) {
+      sampleReader.startNalUnit(position, offset, nalUnitType, pesTimeUs);
+    } else {
       vps.startNalUnit(nalUnitType);
       sps.startNalUnit(nalUnitType);
       pps.startNalUnit(nalUnitType);
     }
     prefixSei.startNalUnit(nalUnitType);
     suffixSei.startNalUnit(nalUnitType);
-    sampleReader.startNalUnit(position, offset, nalUnitType, pesTimeUs);
   }
 
   private void nalUnitData(byte[] dataArray, int offset, int limit) {
@@ -168,7 +173,7 @@ import java.util.Collections;
     suffixSei.appendToNalUnit(dataArray, offset, limit);
   }
 
-  private void nalUnitEnd(long position, int offset, int discardPadding, long pesTimeUs) {
+  private void endNalUnit(long position, int offset, int discardPadding, long pesTimeUs) {
     if (hasOutputFormat) {
       sampleReader.endNalUnit(position, offset);
     } else {
@@ -218,10 +223,10 @@ import java.util.Collections;
     bitArray.skipBits(8); // general_level_idc
     int toSkip = 0;
     for (int i = 0; i < maxSubLayersMinus1; i++) {
-      if (bitArray.readBits(1) == 1) { // sub_layer_profile_present_flag[i]
+      if (bitArray.readBit()) { // sub_layer_profile_present_flag[i]
         toSkip += 89;
       }
-      if (bitArray.readBits(1) == 1) { // sub_layer_level_present_flag[i]
+      if (bitArray.readBit()) { // sub_layer_level_present_flag[i]
         toSkip += 8;
       }
     }
@@ -309,7 +314,9 @@ import java.util.Collections;
         Collections.singletonList(csd), MediaFormat.NO_VALUE, pixelWidthHeightRatio);
   }
 
-  /** Skips scaling_list_data(). See H.265/HEVC (2014) 7.3.4. */
+  /**
+   * Skips scaling_list_data(). See H.265/HEVC (2014) 7.3.4.
+   */
   private static void skipScalingList(ParsableBitArray bitArray) {
     for (int sizeId = 0; sizeId < 4; sizeId++) {
       for (int matrixId = 0; matrixId < 6; matrixId += sizeId == 3 ? 3 : 1) {
@@ -387,10 +394,12 @@ import java.util.Collections;
     private int nalUnitBytesRead;
     private long nalUnitTimeUs;
     private boolean lookingForFirstSliceFlag;
-    private boolean firstSliceFlag;
+    private boolean isFirstSlice;
+    private boolean isFirstParameterSet;
 
     // Per sample state that gets reset at the start of each sample.
     private boolean readingSample;
+    private boolean writingParameterSets;
     private long samplePosition;
     private long sampleTimeUs;
     private boolean sampleIsKeyframe;
@@ -401,20 +410,32 @@ import java.util.Collections;
 
     public void reset() {
       lookingForFirstSliceFlag = false;
-      firstSliceFlag = false;
+      isFirstSlice = false;
+      isFirstParameterSet = false;
       readingSample = false;
+      writingParameterSets = false;
     }
 
     public void startNalUnit(long position, int offset, int nalUnitType, long pesTimeUs) {
-      firstSliceFlag = false;
+      isFirstSlice = false;
+      isFirstParameterSet = false;
       nalUnitTimeUs = pesTimeUs;
       nalUnitBytesRead = 0;
       nalUnitStartPosition = position;
-      // Flush the previous sample when reading a non-VCL NAL unit.
-      if (nalUnitType >= VPS_NUT && readingSample) {
-        outputSample(offset);
-        readingSample = false;
+
+      if (nalUnitType >= VPS_NUT) {
+        if (!writingParameterSets && readingSample) {
+          // This is a non-VCL NAL unit, so flush the previous sample.
+          outputSample(offset);
+          readingSample = false;
+        }
+        if (nalUnitType <= PPS_NUT) {
+          // This sample will have parameter sets at the start.
+          isFirstParameterSet = !writingParameterSets;
+          writingParameterSets = true;
+        }
       }
+
       // Look for the flag if this NAL unit contains a slice_segment_layer_rbsp.
       nalUnitHasKeyframeData = (nalUnitType >= BLA_W_LP && nalUnitType <= CRA_NUT);
       lookingForFirstSliceFlag = nalUnitHasKeyframeData || nalUnitType <= RASL_R;
@@ -424,7 +445,7 @@ import java.util.Collections;
       if (lookingForFirstSliceFlag) {
         int headerOffset = offset + FIRST_SLICE_FLAG_OFFSET - nalUnitBytesRead;
         if (headerOffset < limit) {
-          firstSliceFlag = (data[headerOffset] & 0x80) != 0;
+          isFirstSlice = (data[headerOffset] & 0x80) != 0;
           lookingForFirstSliceFlag = false;
         } else {
           nalUnitBytesRead += limit - offset;
@@ -433,9 +454,14 @@ import java.util.Collections;
     }
 
     public void endNalUnit(long position, int offset) {
-      if (firstSliceFlag) {
-        // If the NAL unit ending is the start of a new sample, output the previous one.
+      if (writingParameterSets && isFirstSlice) {
+        // This sample has parameter sets. Reset the key-frame flag based on the first slice.
+        sampleIsKeyframe = nalUnitHasKeyframeData;
+        writingParameterSets = false;
+      } else if (isFirstParameterSet || isFirstSlice) {
+        // This NAL unit is at the start of a new sample (access unit).
         if (readingSample) {
+          // Output the sample ending before this NAL unit.
           int nalUnitLength = (int) (position - nalUnitStartPosition);
           outputSample(offset + nalUnitLength);
         }
