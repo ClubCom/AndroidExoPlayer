@@ -217,7 +217,9 @@ import java.util.Locale;
 
   public static final Sample[] HLS = new Sample[] {
     new Sample("Uptown Funk",
-        "http://stagingms.clubcom.com/HLSStreaming/Content/344586/344586_800.m3u8", Util.TYPE_HLS),
+        "http://stagingms.clubcom.com/HLSStreaming/Content/344586/344586.m3u8", Util.TYPE_HLS),
+    new Sample("TV 1",
+        "http://192.168.0.11:8001/main", Util.TYPE_HLS),
     new Sample("Apple master playlist",
         "https://devimages.apple.com.edgekey.net/streaming/examples/bipbop_4x3/"
         + "bipbop_4x3_variant.m3u8", Util.TYPE_HLS),
