@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 The Android Open Source Project
+ * Copyright (C) 2016 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,18 +30,28 @@
 #include "vpx/vpx_decoder.h"
 #include "vpx/vp8dx.h"
 
-#define LOG_TAG "LIBVPX_DEC"
+#define LOG_TAG "vpx_jni"
 #define LOGE(...) ((void)__android_log_print(ANDROID_LOG_ERROR, LOG_TAG, \
                                              __VA_ARGS__))
 
-#define FUNC(RETURN_TYPE, NAME, ...) \
+#define DECODER_FUNC(RETURN_TYPE, NAME, ...) \
   extern "C" { \
   JNIEXPORT RETURN_TYPE \
-    Java_com_google_android_exoplayer_ext_vp9_VpxDecoder_ ## NAME \
+    Java_com_google_android_exoplayer2_ext_vp9_VpxDecoder_ ## NAME \
       (JNIEnv* env, jobject thiz, ##__VA_ARGS__);\
   } \
   JNIEXPORT RETURN_TYPE \
-    Java_com_google_android_exoplayer_ext_vp9_VpxDecoder_ ## NAME \
+    Java_com_google_android_exoplayer2_ext_vp9_VpxDecoder_ ## NAME \
+      (JNIEnv* env, jobject thiz, ##__VA_ARGS__)\
+
+#define LIBRARY_FUNC(RETURN_TYPE, NAME, ...) \
+  extern "C" { \
+  JNIEXPORT RETURN_TYPE \
+    Java_com_google_android_exoplayer2_ext_vp9_VpxLibrary_ ## NAME \
+      (JNIEnv* env, jobject thiz, ##__VA_ARGS__);\
+  } \
+  JNIEXPORT RETURN_TYPE \
+    Java_com_google_android_exoplayer2_ext_vp9_VpxLibrary_ ## NAME \
       (JNIEnv* env, jobject thiz, ##__VA_ARGS__)\
 
 // JNI references for VpxOutputBuffer class.
@@ -58,9 +68,9 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
   return JNI_VERSION_1_6;
 }
 
-FUNC(jlong, vpxInit) {
+DECODER_FUNC(jlong, vpxInit) {
   vpx_codec_ctx_t* context = new vpx_codec_ctx_t();
-  vpx_codec_dec_cfg_t cfg = {0};
+  vpx_codec_dec_cfg_t cfg = {0, 0, 0};
   cfg.threads = android_getCpuCount();
   if (vpx_codec_dec_init(context, &vpx_codec_vp9_dx_algo, &cfg, 0)) {
     LOGE("ERROR: Fail to initialize libvpx decoder.");
@@ -69,7 +79,7 @@ FUNC(jlong, vpxInit) {
 
   // Populate JNI References.
   const jclass outputBufferClass = env->FindClass(
-      "com/google/android/exoplayer/ext/vp9/VpxOutputBuffer");
+      "com/google/android/exoplayer2/ext/vp9/VpxOutputBuffer");
   initForYuvFrame = env->GetMethodID(outputBufferClass, "initForYuvFrame",
                                      "(IIIII)V");
   initForRgbFrame = env->GetMethodID(outputBufferClass, "initForRgbFrame",
@@ -81,7 +91,7 @@ FUNC(jlong, vpxInit) {
   return reinterpret_cast<intptr_t>(context);
 }
 
-FUNC(jlong, vpxDecode, jlong jContext, jobject encoded, jint len) {
+DECODER_FUNC(jlong, vpxDecode, jlong jContext, jobject encoded, jint len) {
   vpx_codec_ctx_t* const context = reinterpret_cast<vpx_codec_ctx_t*>(jContext);
   const uint8_t* const buffer =
       reinterpret_cast<const uint8_t*>(env->GetDirectBufferAddress(encoded));
@@ -94,14 +104,14 @@ FUNC(jlong, vpxDecode, jlong jContext, jobject encoded, jint len) {
   return 0;
 }
 
-FUNC(jlong, vpxClose, jlong jContext) {
+DECODER_FUNC(jlong, vpxClose, jlong jContext) {
   vpx_codec_ctx_t* const context = reinterpret_cast<vpx_codec_ctx_t*>(jContext);
   vpx_codec_destroy(context);
   delete context;
   return 0;
 }
 
-FUNC(jint, vpxGetFrame, jlong jContext, jobject jOutputBuffer) {
+DECODER_FUNC(jint, vpxGetFrame, jlong jContext, jobject jOutputBuffer) {
   vpx_codec_ctx_t* const context = reinterpret_cast<vpx_codec_ctx_t*>(jContext);
   vpx_codec_iter_t iter = NULL;
   const vpx_image_t* const img = vpx_codec_get_frame(context, &iter);
@@ -166,10 +176,16 @@ FUNC(jint, vpxGetFrame, jlong jContext, jobject jOutputBuffer) {
   return 0;
 }
 
-FUNC(jstring, getLibvpxVersion) {
+DECODER_FUNC(jstring, vpxGetErrorMessage, jlong jContext) {
+  vpx_codec_ctx_t* const context = reinterpret_cast<vpx_codec_ctx_t*>(jContext);
+  return env->NewStringUTF(vpx_codec_error(context));
+}
+
+LIBRARY_FUNC(jstring, vpxGetVersion) {
   return env->NewStringUTF(vpx_codec_version_str());
 }
 
+<<<<<<< HEAD
 FUNC(jstring, getLibvpxConfig) {
   return env->NewStringUTF(vpx_codec_build_config());
 }
@@ -177,4 +193,8 @@ FUNC(jstring, getLibvpxConfig) {
 FUNC(jstring, vpxGetErrorMessage, jlong jContext) {
   vpx_codec_ctx_t* const context = reinterpret_cast<vpx_codec_ctx_t*>(jContext);
   return env->NewStringUTF(vpx_codec_error(context));
+=======
+LIBRARY_FUNC(jstring, vpxGetBuildConfig) {
+  return env->NewStringUTF(vpx_codec_build_config());
+>>>>>>> google/release-v2
 }
